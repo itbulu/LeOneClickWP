@@ -13,6 +13,14 @@ WP_LANG="${WP_LANG:-zh_CN}"
 DB_NAME="${DB_NAME:-wordpress}"
 DB_USER="${DB_USER:-wpuser}"
 SKIP_FIREWALL="${SKIP_FIREWALL:-0}"
+# 访问方式: ip | domain（也可通过交互选择；设 WP_DOMAIN 则自动用域名模式）
+SITE_MODE="${SITE_MODE:-}"
+WP_DOMAIN="${WP_DOMAIN:-}"
+NONINTERACTIVE="${NONINTERACTIVE:-0}"
+# 是否导入 WP Test 测试数据: 0 | 1（空则交互询问）
+# 数据来源: https://github.com/poststatus/wptest
+IMPORT_TESTDATA="${IMPORT_TESTDATA:-}"
+WTEST_XML_URL="${WTEST_XML_URL:-https://raw.githubusercontent.com/poststatus/wptest/master/wptest.xml}"
 
 # ── 颜色输出 ──────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -65,6 +73,186 @@ get_server_ip() {
     fi
     [[ -n "$ip" ]] || die "无法获取服务器 IP"
     echo "$ip"
+}
+
+# ── 校验域名格式 ──────────────────────────────────────────────
+validate_domain() {
+    local d="$1"
+    [[ "$d" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]
+}
+
+# ── 规范化域名（去协议、路径、末尾斜杠）──────────────────────
+normalize_domain() {
+    local d="$1"
+    d="${d#http://}"
+    d="${d#https://}"
+    d="${d%%/*}"
+    d="${d%/}"
+    echo "${d,,}"
+}
+
+# ── 根据域名生成 Nginx server_name ───────────────────────────
+domain_server_names() {
+    local d="$1"
+    if [[ "$d" == www.* ]]; then
+        echo "${d} ${d#www.}"
+    else
+        echo "${d} www.${d}"
+    fi
+}
+
+# ── 选择 IP 或域名访问 ────────────────────────────────────────
+# 设置全局: ACCESS_MODE, SITE_HOST, SITE_URL, NGINX_SERVER_NAME, NGINX_DEFAULT
+prompt_site_access() {
+    local choice domain
+
+    # 已指定域名 → 域名模式
+    if [[ -n "$WP_DOMAIN" ]]; then
+        WP_DOMAIN="$(normalize_domain "$WP_DOMAIN")"
+        validate_domain "$WP_DOMAIN" || die "域名格式无效: ${WP_DOMAIN}"
+        ACCESS_MODE="domain"
+        SITE_HOST="$WP_DOMAIN"
+        NGINX_SERVER_NAME="$(domain_server_names "$WP_DOMAIN")"
+        NGINX_DEFAULT=""
+        SITE_URL="http://${SITE_HOST}"
+        info "访问方式: 域名 → ${SITE_URL}"
+        warn "请确保域名 DNS 已添加 A 记录指向 ${SERVER_IP}"
+        return
+    fi
+
+    # 已指定模式
+    if [[ -n "$SITE_MODE" ]]; then
+        SITE_MODE="${SITE_MODE,,}"
+        case "$SITE_MODE" in
+            ip)
+                ACCESS_MODE="ip"
+                SITE_HOST="$SERVER_IP"
+                NGINX_SERVER_NAME="_"
+                NGINX_DEFAULT="default_server"
+                SITE_URL="http://${SITE_HOST}"
+                info "访问方式: IP → ${SITE_URL}"
+                return
+                ;;
+            domain)
+                die "域名模式请设置环境变量 WP_DOMAIN，例如: WP_DOMAIN=wp.example.com bash install.sh"
+                ;;
+            *)
+                die "SITE_MODE 仅支持 ip 或 domain，当前: ${SITE_MODE}"
+                ;;
+        esac
+    fi
+
+    # 非交互（管道安装 / 无 TTY）→ 默认 IP
+    if [[ "$NONINTERACTIVE" == "1" ]] || [[ ! -t 0 ]]; then
+        ACCESS_MODE="ip"
+        SITE_HOST="$SERVER_IP"
+        NGINX_SERVER_NAME="_"
+        NGINX_DEFAULT="default_server"
+        SITE_URL="http://${SITE_HOST}"
+        info "非交互模式，默认使用 IP 访问: ${SITE_URL}"
+        return
+    fi
+
+    echo ""
+    echo -e "${CYAN}请选择网站访问方式:${NC}"
+    echo "  1) 仅 IP 访问    → http://${SERVER_IP}/"
+    echo "  2) 绑定域名访问  → http://你的域名/"
+    echo ""
+    read -rp "请输入选项 [1/2] (默认 1): " choice
+    choice="${choice:-1}"
+
+    case "$choice" in
+        1|"")
+            ACCESS_MODE="ip"
+            SITE_HOST="$SERVER_IP"
+            NGINX_SERVER_NAME="_"
+            NGINX_DEFAULT="default_server"
+            SITE_URL="http://${SITE_HOST}"
+            ok "将使用 IP 访问: ${SITE_URL}"
+            ;;
+        2)
+            while true; do
+                read -rp "请输入域名 (例如 wp.example.com): " domain
+                domain="$(normalize_domain "$domain")"
+                if [[ -z "$domain" ]]; then
+                    warn "域名不能为空"
+                    continue
+                fi
+                if ! validate_domain "$domain"; then
+                    warn "域名格式无效，请重新输入"
+                    continue
+                fi
+                break
+            done
+            ACCESS_MODE="domain"
+            SITE_HOST="$domain"
+            NGINX_SERVER_NAME="$(domain_server_names "$domain")"
+            NGINX_DEFAULT=""
+            SITE_URL="http://${SITE_HOST}"
+            ok "将使用域名访问: ${SITE_URL}"
+            echo ""
+            warn "安装前请确认: 域名 ${domain} 的 DNS A 记录已指向 ${SERVER_IP}"
+            read -rp "DNS 已配置好? 按 Enter 继续，Ctrl+C 取消..."
+            ;;
+        *)
+            die "无效选项: ${choice}"
+            ;;
+    esac
+}
+
+# ── 选择是否导入 WP Test 测试数据 ─────────────────────────────
+# 设置全局: IMPORT_TESTDATA_FLAG (0|1)
+prompt_import_testdata() {
+    local choice
+
+    if [[ -n "$IMPORT_TESTDATA" ]]; then
+        case "${IMPORT_TESTDATA,,}" in
+            1|yes|y|true)
+                IMPORT_TESTDATA_FLAG=1
+                info "已指定导入 WP Test 测试数据"
+                ;;
+            0|no|n|false)
+                IMPORT_TESTDATA_FLAG=0
+                info "已指定跳过测试数据导入"
+                ;;
+            *)
+                die "IMPORT_TESTDATA 仅支持 0 或 1，当前: ${IMPORT_TESTDATA}"
+                ;;
+        esac
+        return
+    fi
+
+    if [[ "$NONINTERACTIVE" == "1" ]] || [[ ! -t 0 ]]; then
+        IMPORT_TESTDATA_FLAG=0
+        info "非交互模式，默认不导入测试数据"
+        return
+    fi
+
+    echo ""
+    echo -e "${CYAN}是否导入 WP Test 测试数据包?${NC}"
+    echo "  来源: https://github.com/poststatus/wptest"
+    echo "  说明: 含大量文章/页面/媒体，更接近真实站点，便于测速与主题测试"
+    echo "  注意: 导入含附件，可能需要几分钟"
+    echo ""
+    echo "  1) 不导入（干净默认站点，推荐纯测速）"
+    echo "  2) 导入 WP Test 测试数据"
+    echo ""
+    read -rp "请输入选项 [1/2] (默认 1): " choice
+    choice="${choice:-1}"
+
+    case "$choice" in
+        1|"")
+            IMPORT_TESTDATA_FLAG=0
+            ok "将安装干净 WordPress 站点"
+            ;;
+        2)
+            IMPORT_TESTDATA_FLAG=1
+            ok "安装完成后将导入 WP Test 测试数据"
+            ;;
+        *)
+            die "无效选项: ${choice}"
+            ;;
+    esac
 }
 
 # ── 安装依赖 (Debian/Ubuntu) ──────────────────────────────────
@@ -167,9 +355,9 @@ nginx_site_config() {
     local php_sock="$1"
     cat <<NGINX
 server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    server_name _;
+    listen 80 ${NGINX_DEFAULT};
+    listen [::]:80 ${NGINX_DEFAULT};
+    server_name ${NGINX_SERVER_NAME};
     root ${WP_DIR};
     index index.php index.html;
 
@@ -314,21 +502,58 @@ setup_wordpress() {
     wp post delete 2 --force --allow-root 2>/dev/null || true   # 示例页面
     wp comment delete 1 --force --allow-root 2>/dev/null || true
 
-    # 安装默认测试页面（方便确认站点正常）
-    wp post create \
-        --post_title="Speed Test Page" \
-        --post_content="WordPress 已成功安装。此页面用于测试服务器打开 WP 的速度。" \
-        --post_status=publish \
-        --allow-root >/dev/null
+    # 未导入测试包时创建测速页；导入测试包时由 WP Test 提供丰富内容
+    if [[ "${IMPORT_TESTDATA_FLAG:-0}" != "1" ]]; then
+        wp post create \
+            --post_title="Speed Test Page" \
+            --post_content="WordPress 已成功安装。此页面用于测试服务器打开 WP 的速度。" \
+            --post_status=publish \
+            --allow-root >/dev/null
+    fi
 
-    # 禁用评论/pingback 减少干扰
+    # 禁用评论/pingback 减少干扰（已发布内容不受影响）
     wp option update default_comment_status closed --allow-root
     wp option update default_ping_status closed --allow-root
 
-    # 删除无用插件（保留 Akismet/Hello Dolly 也可，测速时建议禁用）
-    wp plugin deactivate --all --allow-root 2>/dev/null || true
-
     ok "WordPress 安装完成"
+}
+
+# ── 导入 WP Test 测试数据 ─────────────────────────────────────
+# 参考官方 CLI: https://github.com/poststatus/wptest/blob/master/wptest-cli-install.sh
+import_wptest() {
+    info "导入 WP Test 测试数据..."
+    warn "将下载并导入文章、页面与媒体附件，可能需要几分钟，请耐心等待"
+
+    cd "$WP_DIR"
+
+    wp plugin install wordpress-importer --activate --allow-root
+
+    local xml="/tmp/leoneclickwp-wptest-$$.xml"
+    if ! curl -fsSL "$WTEST_XML_URL" -o "$xml"; then
+        warn "无法下载测试数据 XML，已跳过导入"
+        wp plugin deactivate wordpress-importer --allow-root 2>/dev/null || true
+        return 0
+    fi
+
+    # 与官方脚本一致：创建作者并导入附件
+    if wp import "$xml" --authors=create --allow-root; then
+        ok "WP Test 测试数据导入完成"
+    else
+        warn "测试数据导入过程中出现错误，站点仍可使用，请检查后台内容"
+    fi
+    rm -f "$xml"
+
+    # 导入完成后停用并移除导入插件，再统一停用其他默认插件
+    wp plugin deactivate wordpress-importer --allow-root 2>/dev/null || true
+    wp plugin delete wordpress-importer --allow-root 2>/dev/null || true
+
+    fix_permissions
+}
+
+# ── 停用默认插件（测速时减少干扰）────────────────────────────
+deactivate_default_plugins() {
+    cd "$WP_DIR"
+    wp plugin deactivate --all --allow-root 2>/dev/null || true
 }
 
 # ── 保存安装信息 ──────────────────────────────────────────────
@@ -339,8 +564,12 @@ save_credentials() {
   leoneclickwp 安装信息
   安装时间: $(date '+%Y-%m-%d %H:%M:%S')
 ========================================
-网站地址:   http://${SERVER_IP}/
-后台地址:   http://${SERVER_IP}/wp-admin/
+访问方式:   ${ACCESS_MODE} ($([ "$ACCESS_MODE" = "domain" ] && echo "域名" || echo "IP"))
+网站地址:   ${SITE_URL}/
+后台地址:   ${SITE_URL}/wp-admin/
+服务器 IP:  ${SERVER_IP}
+$([ "$ACCESS_MODE" = "domain" ] && echo "绑定域名:   ${SITE_HOST}")
+测试数据:   $([ "${IMPORT_TESTDATA_FLAG:-0}" = "1" ] && echo "已导入 WP Test (wptest)" || echo "未导入")
 管理员账号: ${WP_ADMIN_USER}
 管理员密码: ${WP_ADMIN_PASS}
 数据库名:   ${DB_NAME}
@@ -362,14 +591,21 @@ print_summary() {
     echo -e "${GREEN}║       WordPress 一键安装成功！                       ║${NC}"
     echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "  ${CYAN}网站首页${NC}   http://${SERVER_IP}/"
-    echo -e "  ${CYAN}后台登录${NC}   http://${SERVER_IP}/wp-admin/"
+    echo -e "  ${CYAN}访问方式${NC}   $([ "$ACCESS_MODE" = "domain" ] && echo "域名 (${SITE_HOST})" || echo "IP (${SERVER_IP})")"
+    echo -e "  ${CYAN}网站首页${NC}   ${SITE_URL}/"
+    echo -e "  ${CYAN}后台登录${NC}   ${SITE_URL}/wp-admin/"
+    echo -e "  ${CYAN}服务器 IP${NC}  ${SERVER_IP}"
+    echo -e "  ${CYAN}测试数据${NC}   $([ "${IMPORT_TESTDATA_FLAG:-0}" = "1" ] && echo "已导入 WP Test" || echo "未导入")"
     echo -e "  ${CYAN}管理员${NC}     ${WP_ADMIN_USER}"
     echo -e "  ${CYAN}密码${NC}       ${WP_ADMIN_PASS}"
     echo ""
     echo -e "  凭据已保存至: ${cred_file}"
     echo ""
-    echo -e "  ${YELLOW}提示:${NC} 在浏览器打开 http://${SERVER_IP}/ 即可测试 WP 加载速度"
+    if [[ "$ACCESS_MODE" = "domain" ]]; then
+        echo -e "  ${YELLOW}提示:${NC} 请确认域名 ${SITE_HOST} 的 DNS A 记录指向 ${SERVER_IP}"
+    else
+        echo -e "  ${YELLOW}提示:${NC} 在浏览器打开 ${SITE_URL}/ 即可测试 WP 加载速度"
+    fi
     echo -e "  ${YELLOW}卸载:${NC} bash uninstall.sh"
     echo ""
 }
@@ -390,9 +626,10 @@ main() {
     DB_PASS="${DB_PASS:-$(rand_pass 20)}"
     WP_ADMIN_PASS="${WP_ADMIN_PASS:-$(rand_pass 16)}"
     SERVER_IP="$(get_server_ip)"
-    SITE_URL="http://${SERVER_IP}"
-
     info "服务器 IP: ${SERVER_IP}"
+
+    prompt_site_access
+    prompt_import_testdata
 
     info "安装系统依赖..."
     if [[ "$PKG_MGR" == "apt" ]]; then
@@ -411,6 +648,12 @@ main() {
     tune_php
     fix_permissions
     setup_wordpress "$DB_PASS" "$WP_ADMIN_PASS" "$SITE_URL"
+
+    if [[ "${IMPORT_TESTDATA_FLAG:-0}" == "1" ]]; then
+        import_wptest
+    fi
+    deactivate_default_plugins
+
     open_firewall
 
     # 重启服务确保一切生效
