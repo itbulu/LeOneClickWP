@@ -275,6 +275,10 @@ prompt_import_testdata() {
 # ── 安装依赖 (Debian/Ubuntu) ──────────────────────────────────
 install_debian() {
     export DEBIAN_FRONTEND=noninteractive
+    # 避免 needrestart 交互打断静默安装
+    export NEEDRESTART_MODE="${NEEDRESTART_MODE:-a}"
+    export NEEDRESTART_SUSPEND="${NEEDRESTART_SUSPEND:-1}"
+
     apt-get update -qq
     apt-get install -y -qq curl wget unzip mariadb-server nginx \
         php-fpm php-mysql php-curl php-gd php-intl php-mbstring \
@@ -283,7 +287,10 @@ install_debian() {
     apt-get install -y curl wget unzip mariadb-server nginx \
         php-fpm php-mysql php-curl php-gd php-intl php-mbstring \
         php-xml php-zip php-opcache
-    systemctl enable --now mariadb nginx 2>/dev/null || true
+
+    systemctl enable --now mariadb 2>/dev/null || true
+    systemctl enable --now nginx 2>/dev/null || true
+    start_php_fpm
 }
 
 # ── 安装依赖 (RHEL 系) ────────────────────────────────────────
@@ -292,16 +299,82 @@ install_rhel() {
     $PKG_MGR install -y curl wget unzip mariadb-server nginx \
         php-fpm php-mysqlnd php-curl php-gd php-intl php-mbstring \
         php-xml php-zip php-opcache
-    systemctl enable --now mariadb nginx php-fpm
+    systemctl enable --now mariadb nginx 2>/dev/null || true
+    start_php_fpm
+}
+
+# ── 启动 PHP-FPM（兼容 php8.x-fpm / php-fpm）─────────────────
+start_php_fpm() {
+    local ver="" unit
+    if command -v php &>/dev/null; then
+        ver="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$ver" ]]; then
+        systemctl enable --now "php${ver}-fpm" 2>/dev/null || true
+    fi
+    systemctl enable --now php-fpm 2>/dev/null || true
+
+    # 扫描并启动所有已安装的 php*-fpm 单元
+    while IFS= read -r unit; do
+        [[ -n "$unit" ]] || continue
+        systemctl enable --now "$unit" 2>/dev/null || true
+    done < <(systemctl list-unit-files 'php*-fpm.service' --no-legend 2>/dev/null | awk '{print $1}')
 }
 
 # ── 检测 PHP-FPM socket ─────────────────────────────────────
 detect_php_fpm() {
-    local sock=""
-    sock=$(find /var/run/php /run/php-fpm -name '*.sock' 2>/dev/null | grep -E 'fpm|php' | sort -V | tail -1)
-    [[ -n "$sock" ]] || sock="/run/php-fpm/www.sock"
-    [[ -S "$sock" ]] || die "未找到 PHP-FPM socket，请确认 php-fpm 已安装并运行"
-    echo "$sock"
+    local sock="" candidate ver="" i
+
+    start_php_fpm
+
+    if command -v php &>/dev/null; then
+        ver="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)"
+    fi
+
+    # 等待 socket 出现（部分系统启动稍慢）
+    for i in $(seq 1 15); do
+        if [[ -n "$ver" ]]; then
+            for candidate in \
+                "/run/php/php${ver}-fpm.sock" \
+                "/var/run/php/php${ver}-fpm.sock" \
+                "/run/php-fpm/www.sock" \
+                "/var/run/php-fpm/www.sock"
+            do
+                if [[ -S "$candidate" ]]; then
+                    echo "$candidate"
+                    return 0
+                fi
+            done
+        fi
+
+        sock="$(find /run/php /var/run/php /run/php-fpm /var/run/php-fpm \
+            -type s \( -name '*fpm*.sock' -o -name 'php*.sock' -o -name 'www.sock' \) \
+            2>/dev/null | sort -V | tail -1 || true)"
+        if [[ -n "$sock" && -S "$sock" ]]; then
+            echo "$sock"
+            return 0
+        fi
+
+        sleep 1
+    done
+
+    warn "PHP-FPM 状态:"
+    systemctl status "php${ver}-fpm" --no-pager 2>/dev/null || systemctl status php-fpm --no-pager 2>/dev/null || true
+    ls -la /run/php /var/run/php 2>/dev/null || true
+    die "未找到 PHP-FPM socket。请手动执行: systemctl start php${ver:-}-fpm 或 systemctl start php-fpm"
+}
+
+restart_php_fpm() {
+    local ver=""
+    if command -v php &>/dev/null; then
+        ver="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null || true)"
+    fi
+    if [[ -n "$ver" ]]; then
+        systemctl restart "php${ver}-fpm" 2>/dev/null && return 0
+    fi
+    systemctl restart php-fpm 2>/dev/null || true
+    start_php_fpm
 }
 
 # ── MariaDB 执行 SQL ──────────────────────────────────────────
@@ -443,12 +516,6 @@ realpath_cache_size=4096K
 realpath_cache_ttl=600
 PHPINI
     restart_php_fpm
-}
-
-restart_php_fpm() {
-    local ver
-    ver="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
-    systemctl restart "php${ver}-fpm" 2>/dev/null || systemctl restart php-fpm 2>/dev/null || true
 }
 
 # ── 防火墙放行 80 ─────────────────────────────────────────────

@@ -223,6 +223,18 @@ curl -fsSL -o /tmp/wptest.xml https://raw.githubusercontent.com/poststatus/wptes
 wp import /tmp/wptest.xml --authors=create --allow-root
 ```
 
+**Q: 报错「未找到 PHP-FPM socket」？**
+
+多为 PHP-FPM 未启动。可手动执行后重跑安装：
+
+```bash
+# Ubuntu/Debian（按实际版本，如 8.1 / 8.3）
+systemctl enable --now php$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')-fpm
+ls -la /run/php/
+```
+
+新版脚本会在安装后自动启动 PHP-FPM 并等待 socket 就绪。
+
 **Q: 如何查看安装凭据？**
 
 ```bash
