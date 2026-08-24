@@ -32,6 +32,21 @@ die()   { echo -e "${RED}[FAIL]${NC}  $*" >&2; exit 1; }
 # ── 随机密码 ──────────────────────────────────────────────────
 rand_pass() { tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${1:-16}"; echo; }
 
+# ── 是否可交互提问（curl|bash 时 stdin 非 TTY，改从 /dev/tty 读）──
+can_prompt() {
+    [[ "$NONINTERACTIVE" != "1" ]] && [[ -r /dev/tty ]] && [[ -w /dev/tty ]]
+}
+
+# 从终端读入（兼容 curl | bash）
+ask() {
+    # $1 = 提示文案；结果写入 REPLY 风格变量名由调用方用 read 赋值
+    local prompt="$1"
+    local __ans=""
+    # -r 禁用反斜杠转义；从真实终端读，避免被管道占用
+    read -r -p "$prompt" __ans </dev/tty || true
+    printf '%s' "$__ans"
+}
+
 # ── 检测 root ─────────────────────────────────────────────────
 [[ $EUID -eq 0 ]] || die "请使用 root 运行: sudo bash install.sh"
 
@@ -142,14 +157,15 @@ prompt_site_access() {
         esac
     fi
 
-    # 非交互（管道安装 / 无 TTY）→ 默认 IP
-    if [[ "$NONINTERACTIVE" == "1" ]] || [[ ! -t 0 ]]; then
+    # 仅在明确关闭交互，或没有可用终端时跳过提问
+    if ! can_prompt; then
         ACCESS_MODE="ip"
         SITE_HOST="$SERVER_IP"
         NGINX_SERVER_NAME="_"
         NGINX_DEFAULT="default_server"
         SITE_URL="http://${SITE_HOST}"
         info "非交互模式，默认使用 IP 访问: ${SITE_URL}"
+        info "提示: 设置 WP_DOMAIN=域名 或下载脚本后运行可选择域名"
         return
     fi
 
@@ -158,7 +174,7 @@ prompt_site_access() {
     echo "  1) 仅 IP 访问    → http://${SERVER_IP}/"
     echo "  2) 绑定域名访问  → http://你的域名/"
     echo ""
-    read -rp "请输入选项 [1/2] (默认 1): " choice
+    choice="$(ask "请输入选项 [1/2] (默认 1): ")"
     choice="${choice:-1}"
 
     case "$choice" in
@@ -172,7 +188,7 @@ prompt_site_access() {
             ;;
         2)
             while true; do
-                read -rp "请输入域名 (例如 wp.example.com): " domain
+                domain="$(ask "请输入域名 (例如 wp.example.com): ")"
                 domain="$(normalize_domain "$domain")"
                 if [[ -z "$domain" ]]; then
                     warn "域名不能为空"
@@ -192,7 +208,7 @@ prompt_site_access() {
             ok "将使用域名访问: ${SITE_URL}"
             echo ""
             warn "安装前请确认: 域名 ${domain} 的 DNS A 记录已指向 ${SERVER_IP}"
-            read -rp "DNS 已配置好? 按 Enter 继续，Ctrl+C 取消..."
+            ask "DNS 已配置好? 按 Enter 继续，Ctrl+C 取消..." >/dev/null
             ;;
         *)
             die "无效选项: ${choice}"
@@ -222,9 +238,10 @@ prompt_import_testdata() {
         return
     fi
 
-    if [[ "$NONINTERACTIVE" == "1" ]] || [[ ! -t 0 ]]; then
+    if ! can_prompt; then
         IMPORT_TESTDATA_FLAG=0
         info "非交互模式，默认不导入测试数据"
+        info "提示: 设置 IMPORT_TESTDATA=1 可启用导入"
         return
     fi
 
@@ -237,7 +254,7 @@ prompt_import_testdata() {
     echo "  1) 不导入（干净默认站点，推荐纯测速）"
     echo "  2) 导入 WP Test 测试数据"
     echo ""
-    read -rp "请输入选项 [1/2] (默认 1): " choice
+    choice="$(ask "请输入选项 [1/2] (默认 1): ")"
     choice="${choice:-1}"
 
     case "$choice" in

@@ -71,7 +71,7 @@ sudo bash install.sh
 1. **不导入** — 干净默认站点（推荐纯测速）  
 2. **导入 WP Test** — 使用 [poststatus/wptest](https://github.com/poststatus/wptest) 数据包，含大量文章、页面与媒体附件，更接近真实站点负载
 
-> 通过 `curl | bash` 管道安装时默认为 **IP 模式** 且 **不导入测试数据**；如需自定义请使用环境变量（见下方）。
+> 通过 `curl | bash` 安装时也会弹出交互选择（从终端读取输入）。若需完全静默安装，请设置 `NONINTERACTIVE=1`。
 
 也可以只下载安装脚本：
 
@@ -139,7 +139,7 @@ sudo bash install.sh
 | `SITE_MODE` | （交互选择） | 访问方式：`ip` 或 `domain` |
 | `WP_DOMAIN` | — | 绑定域名（设置后自动启用域名模式） |
 | `IMPORT_TESTDATA` | （交互选择） | `1` 导入 WP Test，`0` 跳过；非交互默认 `0` |
-| `NONINTERACTIVE` | `0` | 设为 `1` 跳过交互；无 TTY 时默认 IP 且不导入测试数据 |
+| `NONINTERACTIVE` | `0` | 设为 `1` 跳过全部交互；默认 IP 且不导入测试数据 |
 | `WP_DIR` | `/var/www/wordpress` | WordPress 安装目录 |
 | `WP_TITLE` | `WordPress Speed Test` | 站点标题 |
 | `WP_ADMIN_USER` | `admin` | 管理员用户名 |
